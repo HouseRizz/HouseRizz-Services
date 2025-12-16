@@ -1,0 +1,33 @@
+# FastAPI and Server
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.6
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Data Validation
+pydantic>=2.5.0
+
+# Google Cloud AI
+google-cloud-aiplatform>=1.40.0
+google-genai>=0.3.0
+
+# Vector Database (Firestore)
+google-cloud-firestore>=2.14.0
+
+# Cloud Storage
+google-cloud-storage>=2.14.0
+
+# Image Processing
+Pillow>=10.2.0
+
+# HTTP client for image downloads
+httpx>=0.25.0
+
+# Async File Operations
+aiofiles>=23.2.1
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
