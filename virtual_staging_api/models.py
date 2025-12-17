@@ -139,9 +139,51 @@ class GenerateRequest(BaseModel):
     vibe_text: str = Field(..., description="Desired style/vibe")
 
 
+class LocalizationRequest(BaseModel):
+    """Request payload for /detect-furniture endpoint."""
+    image_base64: Optional[str] = Field(None, description="Base64-encoded image")
+    image_url: Optional[str] = Field(None, description="Public URL of the image")
+    target_objects: list[str] = Field(default=[], description="List of specific objects to detect")
+
+
+class LocalizedObject(BaseModel):
+    """Represents a detected object with its polygon boundary."""
+    label: str = Field(..., description="Object label (e.g. sofa, chair)")
+    polygon: list[list[float]] = Field(..., description="List of [ymin, xmin] coordinates")
+
+
+class LocalizationResponse(BaseModel):
+    """Response payload for /detect-furniture endpoint."""
+    objects: list[LocalizedObject] = Field(..., description="List of detected objects")
+    count: int = Field(..., description="Number of objects detected")
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
     
     status: str = Field(default="healthy")
     version: str = Field(default="0.1.0")
+
+
+class SegmentRequest(BaseModel):
+    """Request payload for /segment endpoint."""
+    image_base64: str = Field(..., description="Base64-encoded image to segment")
+    use_sam_hq: bool = Field(default=False, description="Use SAM-HQ for higher quality")
+
+
+class DetectedObject(BaseModel):
+    """A detected object with bounding box and label."""
+    label: str = Field(..., description="Object label")
+    box: list[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
+    confidence: float = Field(..., description="Detection confidence (logit)")
+    value: int = Field(..., description="Mask value for this object")
+
+
+class SegmentResponse(BaseModel):
+    """Response payload for /segment endpoint."""
+    masked_img: str = Field(..., description="URL to segmentation mask image")
+    visualization_img: str = Field(..., description="URL to bounding box visualization")
+    tags: str = Field(..., description="Comma-separated detected object tags")
+    objects: list[DetectedObject] = Field(..., description="List of detected objects")
+
 

@@ -33,6 +33,11 @@ from services.virtual_staging_api.models import (
     DesignResponse,
     FurnitureItem,
     GenerateRequest,
+    LocalizationRequest,
+    LocalizationResponse,
+    SegmentRequest,
+    SegmentResponse,
+    DetectedObject,
 )
 from services.virtual_staging_api.ingest import ingest_inventory
 from services.virtual_staging_api.selector import select_furniture, select_furniture_from_bytes
@@ -404,6 +409,96 @@ async def generate_room_manual(request: GenerateRequest):
     except Exception as e:
         logger.error(f"Generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+@app.post("/detect-furniture", response_model=LocalizationResponse, tags=["Design"])
+async def detect_furniture_endpoint(request: LocalizationRequest):
+    """
+    Detect furniture in an image and return polygon boundaries.
+    
+    Accepts either an image URL or base64 data.
+    """
+    import httpx
+    from services.virtual_staging_api.locator import localize_objects
+    
+    try:
+        image_bytes = None
+        
+        # Prioritize image_url
+        if request.image_url:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(request.image_url)
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=400, detail="Failed to download image from URL")
+                image_bytes = resp.content
+        elif request.image_base64:
+            try:
+                image_bytes = base64.b64decode(request.image_base64)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid base64 image data")
+        else:
+            raise HTTPException(status_code=400, detail="Either image_url or image_base64 is required")
+            
+        # Run localization
+        objects = await localize_objects(image_bytes, request.target_objects)
+        
+        return LocalizationResponse(
+            objects=objects,
+            count=len(objects)
+        )
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Localization failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Localization failed: {str(e)}")
+
+
+@app.post("/segment", response_model=SegmentResponse, tags=["Design"])
+async def segment_image_endpoint(request: SegmentRequest):
+    """
+    Segment all objects in an image using RAM-Grounded-SAM.
+    
+    Returns mask URL and detected objects for furniture highlighting.
+    """
+    from services.virtual_staging_api.segmentor import segment_image
+    
+    try:
+        # Decode base64 image
+        try:
+            image_bytes = base64.b64decode(request.image_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 image data")
+        
+        # Run segmentation
+        result = await segment_image(image_bytes, request.use_sam_hq)
+        
+        # Parse detections
+        json_data = result.get("json_data", {})
+        masks = json_data.get("mask", [])
+        
+        detected_objects = []
+        for item in masks:
+            if item.get("label") != "background":
+                detected_objects.append(DetectedObject(
+                    label=item.get("label", "unknown"),
+                    box=item.get("box", [0, 0, 0, 0]),
+                    confidence=item.get("logit", 0.0),
+                    value=item.get("value", 0)
+                ))
+        
+        return SegmentResponse(
+            masked_img=result.get("masked_img", ""),
+            visualization_img=result.get("rounding_box_img", ""),
+            tags=result.get("tags", ""),
+            objects=detected_objects
+        )
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Segmentation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
 
 
 @app.get("/furniture/{filepath:path}", tags=["Inventory"])

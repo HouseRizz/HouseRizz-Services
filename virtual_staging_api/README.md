@@ -63,6 +63,39 @@ Deployed URL: `https://virtual-staging-api-wmggns3mvq-uc.a.run.app`
     }
     ```
 
+      ]
+    }
+    ```
+
+### 5. Furniture Localization
+- **POST /detect-furniture**: Detect furniture in an image and get polygon boundaries for highlighting.
+  - Body:
+    ```json
+    {
+      "image_url": "https://...",
+      "target_objects": ["sofa", "chair"] 
+    }
+    ```
+    OR
+    ```json
+    {
+      "image_base64": "...",
+      "target_objects": ["sofa", "chair"]
+    }
+    ```
+  - Returns:
+    ```json
+    {
+      "objects": [
+        {
+          "label": "sofa",
+          "polygon": [[0.1, 0.2], [0.1, 0.5], ...] 
+        }
+      ],
+      "count": 1
+    }
+    ```
+
 ## Frontend Implementation Guide
 
 ### Uploading Images & Generating

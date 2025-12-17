@@ -50,6 +50,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --max-instances="10" \
     --min-instances="0" \
     --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION}" \
+    --set-secrets="REPLICATE_API_TOKEN=projects/986776132088/secrets/REPLICATE_API_TOKEN:latest" \
     --allow-unauthenticated \
     --quiet \
     --project="$PROJECT_ID"
