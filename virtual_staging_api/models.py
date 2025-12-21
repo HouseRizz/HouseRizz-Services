@@ -187,3 +187,15 @@ class SegmentResponse(BaseModel):
     objects: list[DetectedObject] = Field(..., description="List of detected objects")
 
 
+class DesignWithSegmentationResponse(BaseModel):
+    """Response payload for /design/upload-with-segmentation endpoint."""
+    success: bool = Field(default=True, description="Whether generation succeeded")
+    generated_image_url: str = Field(..., description="URL to generated room image")
+    furniture_used: list[dict] = Field(default_factory=list, description="Furniture used in generation")
+    vibe: str = Field(..., description="Vibe/style used")
+    # Segmentation data for the GENERATED image
+    segmentation: Optional[SegmentResponse] = Field(None, description="Segmentation of generated image")
+    # Matched labels: maps furniture_used types to detected segmentation labels
+    matched_labels: list[str] = Field(default_factory=list, description="Segmentation labels that match furniture_used items")
+
+

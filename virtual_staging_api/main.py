@@ -38,6 +38,7 @@ from services.virtual_staging_api.models import (
     SegmentRequest,
     SegmentResponse,
     DetectedObject,
+    DesignWithSegmentationResponse,
 )
 from services.virtual_staging_api.ingest import ingest_inventory
 from services.virtual_staging_api.selector import select_furniture, select_furniture_from_bytes
@@ -499,6 +500,200 @@ async def segment_image_endpoint(request: SegmentRequest):
     except Exception as e:
         logger.error(f"Segmentation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
+
+
+@app.post("/design/upload-with-segmentation", response_model=DesignWithSegmentationResponse, tags=["Design"])
+async def design_room_with_segmentation(request: dict):
+    """
+    Full design pipeline with segmentation of the generated image.
+    
+    This endpoint:
+    1. Generates a redesigned room using the virtual staging pipeline
+    2. Runs RAM-Grounded-SAM on the generated image to detect furniture
+    3. Returns both the image URL and detected objects
+    
+    The detected objects can be used by the client to:
+    - Let users select which furniture to highlight/grey out
+    - Show clickable zones on the generated image
+    
+    Args:
+        room_image_base64: Base64-encoded room image
+        mime_type: MIME type (default: image/jpeg)
+        vibe_text: User's desired style
+        run_segmentation: Whether to run segmentation (default: true)
+        
+    Returns:
+        Generated room URL + segmentation data with detected objects
+    """
+    from services.virtual_staging_api.composer import compose_room
+    from services.virtual_staging_api.segmentor import segment_image
+    import httpx
+    
+    try:
+        # Validate required fields
+        room_image_base64 = request.get("room_image_base64")
+        if not room_image_base64:
+            raise HTTPException(status_code=400, detail="room_image_base64 is required")
+        
+        vibe_text = request.get("vibe_text", "modern interior design")
+        mime_type = request.get("mime_type", "image/jpeg")
+        run_segmentation = request.get("run_segmentation", True)
+        
+        # Decode base64 image
+        try:
+            image_bytes = base64.b64decode(room_image_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 image data")
+        
+        # Run design generation
+        logger.info(f"Starting design generation with vibe: {vibe_text}")
+        design_result = await compose_room(
+            room_image_bytes=image_bytes,
+            mime_type=mime_type,
+            vibe_text=vibe_text
+        )
+        
+        generated_image_url = design_result.get("generated_image_url", "")
+        furniture_used = design_result.get("furniture_used", [])
+        
+        # Optionally run segmentation on the generated image
+        segmentation_response = None
+        if run_segmentation and generated_image_url:
+            try:
+                logger.info("Running segmentation on generated image")
+                
+                # Download the generated image
+                async with httpx.AsyncClient() as client:
+                    img_response = await client.get(generated_image_url, timeout=30)
+                    img_response.raise_for_status()
+                    generated_image_bytes = img_response.content
+                
+                # Run segmentation
+                seg_result = await segment_image(generated_image_bytes, use_sam_hq=False)
+                
+                # Parse detections
+                json_data = seg_result.get("json_data", {})
+                masks = json_data.get("mask", [])
+                
+                detected_objects = []
+                for item in masks:
+                    if item.get("label") != "background":
+                        detected_objects.append(DetectedObject(
+                            label=item.get("label", "unknown"),
+                            box=item.get("box", [0, 0, 0, 0]),
+                            confidence=item.get("logit", 0.0),
+                            value=item.get("value", 0)
+                        ))
+                
+                segmentation_response = SegmentResponse(
+                    masked_img=seg_result.get("masked_img", ""),
+                    visualization_img=seg_result.get("rounding_box_img", ""),
+                    tags=seg_result.get("tags", ""),
+                    objects=detected_objects
+                )
+                
+                logger.info(f"Segmentation found {len(detected_objects)} objects: {seg_result.get('tags', '')}")
+                
+            except Exception as e:
+                logger.warning(f"Segmentation failed (non-fatal): {e}")
+                # Continue without segmentation
+        
+        # Match furniture_used to segmentation labels using LLM
+        matched_labels = []
+        if segmentation_response and furniture_used:
+            try:
+                from google import genai
+                from PIL import Image
+                import io
+                import json
+                
+                # Initialize GenAI client
+                genai_client = genai.Client(
+                    vertexai=True,
+                    project=config.GOOGLE_CLOUD_PROJECT,
+                    location="global",
+                )
+                
+                # Get all detected labels
+                detected_labels = [obj.label for obj in segmentation_response.objects]
+                
+                # For each furniture item, use LLM to find matching segmentation label
+                for furniture in furniture_used:
+                    furniture_name = furniture.get("name", "")
+                    furniture_type = furniture.get("type", "")
+                    image_url = furniture.get("image_url", "")
+                    
+                    # Build prompt with furniture info
+                    matching_prompt = f"""You are matching furniture items to detected object labels.
+
+FURNITURE ITEM:
+- Name: {furniture_name}
+- Type: {furniture_type}
+
+DETECTED OBJECT LABELS IN THE IMAGE:
+{json.dumps(detected_labels, indent=2)}
+
+Which of the detected labels above matches this furniture item? 
+Return ONLY the exact matching label from the list, or "none" if no match.
+Be flexible - for example "chair" could match "armchair chair", "sofa" could match "couch".
+Return ONLY the label, nothing else."""
+
+                    # If we have the image URL, try to download and include it
+                    content = [matching_prompt]
+                    if image_url:
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                img_resp = await client.get(image_url, timeout=10)
+                                if img_resp.status_code == 200:
+                                    furniture_image = Image.open(io.BytesIO(img_resp.content))
+                                    content = [matching_prompt, furniture_image]
+                        except Exception as img_e:
+                            logger.warning(f"Could not load furniture image: {img_e}")
+                    
+                    # Ask LLM to match
+                    response = genai_client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=content,
+                    )
+                    
+                    matched_label = response.text.strip().lower()
+                    
+                    # Validate the match is actually in detected labels
+                    if matched_label != "none":
+                        for detected in detected_labels:
+                            if matched_label == detected.lower() or matched_label in detected.lower():
+                                if detected.lower() not in matched_labels:
+                                    matched_labels.append(detected.lower())
+                                break
+                
+                logger.info(f"LLM matched furniture labels: {matched_labels}")
+                
+            except Exception as e:
+                logger.warning(f"LLM label matching failed: {e}")
+                # Fallback: just use detected furniture-like labels
+                furniture_keywords = ["chair", "sofa", "table", "bed", "lamp", "cabinet", "desk", "couch", "armchair"]
+                for obj in segmentation_response.objects:
+                    label = obj.label.lower()
+                    for keyword in furniture_keywords:
+                        if keyword in label:
+                            if label not in matched_labels:
+                                matched_labels.append(label)
+                            break
+        
+        return DesignWithSegmentationResponse(
+            success=True,
+            generated_image_url=generated_image_url,
+            furniture_used=furniture_used,
+            vibe=vibe_text,
+            segmentation=segmentation_response,
+            matched_labels=matched_labels
+        )
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Design with segmentation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Design generation failed: {str(e)}")
 
 
 @app.get("/furniture/{filepath:path}", tags=["Inventory"])

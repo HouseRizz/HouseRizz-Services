@@ -57,7 +57,19 @@ async def segment_image(image_bytes: bytes, use_sam_hq: bool = False) -> dict:
         
         logger.info(f"Segmentation complete. Tags: {output.get('tags', 'N/A')}")
         
-        return output
+        # Convert FileOutput objects to URL strings (Replicate SDK v0.24+)
+        result = {}
+        for key, value in output.items():
+            if hasattr(value, 'url'):
+                # FileOutput object - get the URL
+                result[key] = str(value.url)
+            elif hasattr(value, '__str__') and 'FileOutput' in str(type(value)):
+                # Fallback for FileOutput - convert to string
+                result[key] = str(value)
+            else:
+                result[key] = value
+        
+        return result
         
     except Exception as e:
         logger.error(f"Segmentation failed: {e}")
