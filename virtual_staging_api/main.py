@@ -21,6 +21,10 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from PIL import Image, ImageDraw, ImageFont
+import io
+import json
+import httpx
 
 from services.virtual_staging_api.config import config
 from services.virtual_staging_api.models import (
@@ -39,6 +43,7 @@ from services.virtual_staging_api.models import (
     SegmentResponse,
     DetectedObject,
     DesignWithSegmentationResponse,
+    FurnitureWithPosition,
 )
 from services.virtual_staging_api.ingest import ingest_inventory
 from services.virtual_staging_api.selector import select_furniture, select_furniture_from_bytes
@@ -502,6 +507,59 @@ async def segment_image_endpoint(request: SegmentRequest):
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
 
 
+def annotate_image_with_boxes(image_bytes: bytes, objects: list, indices: list[int]) -> Image.Image:
+    """
+    Draw numbered bounding boxes on an image for VLM matching.
+    Returns PIL Image with boxes drawn.
+    """
+    try:
+        # Load image
+        img = Image.open(io.BytesIO(image_bytes))
+        img_copy = img.copy()
+        draw = ImageDraw.Draw(img_copy)
+        width, height = img_copy.size
+        
+        # Font - try to load a decent one or default
+        try:
+            # Try a standard font
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+        except:
+            font = ImageFont.load_default()
+            
+        for idx in indices:
+            if idx >= len(objects):
+                continue
+                
+            obj = objects[idx]
+            box = obj.box # [x1, y1, x2, y2]
+            
+            # Check if normalized and convert to pixels if needed
+            if all(c <= 1.0 for c in box):
+                x1, y1, x2, y2 = box[0]*width, box[1]*height, box[2]*width, box[3]*height
+            else:
+                x1, y1, x2, y2 = box
+                
+            # Draw box (Bright Green)
+            draw.rectangle([x1, y1, x2, y2], outline="#00FF00", width=4)
+            
+            # Draw Label with Index
+            label_text = str(idx)
+            
+            # Draw background for text
+            text_bbox = draw.textbbox((x1, y1), label_text, font=font)
+            # Add padding
+            text_padding = 10
+            text_bbox = (text_bbox[0], text_bbox[1], text_bbox[2]+text_padding, text_bbox[3]+text_padding)
+            
+            draw.rectangle(text_bbox, fill="black")
+            draw.text((x1+5, y1+5), label_text, fill="white", font=font)
+            
+        return img_copy
+    except Exception as e:
+        logger.warning(f"Annotation failed: {e}")
+        return None
+
+
 @app.post("/design/upload-with-segmentation", response_model=DesignWithSegmentationResponse, tags=["Design"])
 async def design_room_with_segmentation(request: dict):
     """
@@ -600,6 +658,7 @@ async def design_room_with_segmentation(request: dict):
         
         # Match furniture_used to segmentation labels using LLM
         matched_labels = []
+        furniture_markers = []
         if segmentation_response and furniture_used:
             try:
                 from google import genai
@@ -617,56 +676,236 @@ async def design_room_with_segmentation(request: dict):
                 # Get all detected labels
                 detected_labels = [obj.label for obj in segmentation_response.objects]
                 
+                # Track used object indices to prevent duplicate assignment
+                used_object_indices = set()
+                
+                # Get image dimensions for normalization (once)
+                img_width = 1024
+                img_height = 1024
+                try:
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(generated_image_bytes))
+                    img_width, img_height = img.size
+                except:
+                    pass
+
                 # For each furniture item, use LLM to find matching segmentation label
                 for furniture in furniture_used:
                     furniture_name = furniture.get("name", "")
                     furniture_type = furniture.get("type", "")
                     image_url = furniture.get("image_url", "")
                     
-                    # Build prompt with furniture info
-                    matching_prompt = f"""You are matching furniture items to detected object labels.
+                    # Skip if no name
+                    if not furniture_name:
+                        continue
+                        
+                    matched_idx = None
+                    
+                    # TYPE COMPATIBILITY MAP
+                    TYPE_COMPATIBILITY = {
+                        "chair": ["chair", "armchair", "seat", "stool", "dining chair", "office chair"],
+                        "armchair": ["armchair", "chair", "seat", "sofa chair"],
+                        "sofa": ["sofa", "couch", "settee", "loveseat"],
+                        "table": ["table", "desk", "coffee table", "side table", "dining table", "end table"],
+                        "bed": ["bed", "mattress", "bedframe"],
+                        "lamp": ["lamp", "light", "lighting", "floor lamp", "table lamp", "chandelier"],
+                        "rug": ["rug", "carpet", "mat"],
+                        "cabinet": ["cabinet", "cupboard", "wardrobe", "dresser", "chest", "storage"],
+                        "shelf": ["shelf", "bookshelf", "shelving", "rack"],
+                        "plant": ["plant", "potted plant", "flower", "vase"],
+                        "stool": ["stool", "seat", "bench"],
+                    }
+                    
+                    # Structural items to exclude
+                    excluded_labels = {
+                        "floor", "wall", "ceiling", "room", "bedroom", "living room", 
+                        "kitchen", "bathroom", "window", "door", "door frame", 
+                        "window frame", "curtain", "blinds", "background", "picture frame",
+                        "pillow", "blanket"
+                    }
+                    
+                    # Get compatible labels for this furniture type
+                    furniture_type_lower = furniture_type.lower()
+                    compatible_labels = TYPE_COMPATIBILITY.get(furniture_type_lower, [furniture_type_lower])
+                    if furniture_type_lower and furniture_type_lower not in compatible_labels:
+                        compatible_labels = [furniture_type_lower] + list(compatible_labels)
 
-FURNITURE ITEM:
-- Name: {furniture_name}
-- Type: {furniture_type}
-
-DETECTED OBJECT LABELS IN THE IMAGE:
-{json.dumps(detected_labels, indent=2)}
-
-Which of the detected labels above matches this furniture item? 
-Return ONLY the exact matching label from the list, or "none" if no match.
-Be flexible - for example "chair" could match "armchair chair", "sofa" could match "couch".
-Return ONLY the label, nothing else."""
-
-                    # If we have the image URL, try to download and include it
-                    content = [matching_prompt]
-                    if image_url:
+                    # STEP 1: Filter candidates by TYPE COMPATIBILITY (not all objects)
+                    candidate_indices = []
+                    for i, obj in enumerate(segmentation_response.objects):
+                        if i in used_object_indices:
+                            continue
+                        
+                        obj_label = obj.label.lower()
+                        
+                        # Skip structural elements
+                        if any(excl in obj_label for excl in excluded_labels):
+                            continue
+                        
+                        # Only include objects with compatible type
+                        is_compatible = False
+                        for compat in compatible_labels:
+                            if compat in obj_label or obj_label in compat:
+                                is_compatible = True
+                                break
+                        
+                        if is_compatible:
+                            candidate_indices.append(i)
+                    
+                    logger.info(f"Type-filtered candidates for '{furniture_name}' ({furniture_type}): {[segmentation_response.objects[i].label for i in candidate_indices]}")
+                            
+                    if not candidate_indices:
+                        logger.warning(f"No type-compatible objects found for '{furniture_name}' ({furniture_type})")
+                        continue
+                        
+                    # STRATEGY 1: Visual Matching (preferred if image available and multiple candidates)
+                    if image_url and len(candidate_indices) > 1:
                         try:
-                            async with httpx.AsyncClient() as client:
-                                img_resp = await client.get(image_url, timeout=10)
-                                if img_resp.status_code == 200:
-                                    furniture_image = Image.open(io.BytesIO(img_resp.content))
-                                    content = [matching_prompt, furniture_image]
-                        except Exception as img_e:
-                            logger.warning(f"Could not load furniture image: {img_e}")
+                            # Annotate generated image with numbered boxes for candidates ONLY
+                            annotated_img = annotate_image_with_boxes(generated_image_bytes, segmentation_response.objects, candidate_indices)
+                            
+                            logger.info(f"VLM matching for '{furniture_name}': {len(candidate_indices)} same-type candidates")
+                            
+                            if annotated_img:
+                                # Download furniture image
+                                furniture_img = None
+                                async with httpx.AsyncClient() as client:
+                                    resp = await client.get(image_url, timeout=10)
+                                    if resp.status_code == 200:
+                                        furniture_img = Image.open(io.BytesIO(resp.content))
+                                        
+                                if furniture_img:
+                                    # Improved VLM prompt for visual comparison
+                                    vlm_prompt = f"""Compare these images to find the matching furniture.
+
+IMAGE 1 (Room): Shows numbered green boxes around {len(candidate_indices)} {furniture_type} items.
+IMAGE 2 (Product): The furniture product to find - "{furniture_name}"
+
+TASK: Which numbered box contains the furniture that visually matches the product?
+Look for: matching COLOR, MATERIAL (wood type, fabric), and STYLE.
+
+VALID ANSWERS: {candidate_indices}
+Return ONLY the matching number. If unsure, pick the closest match."""
+                                    
+                                    vlm_response = genai_client.models.generate_content(
+                                        model="gemini-3-flash-preview",
+                                        contents=[vlm_prompt, annotated_img, furniture_img]
+                                    )
+                                    
+                                    text = vlm_response.text.strip()
+                                    # Extract just the number
+                                    import re
+                                    numbers = re.findall(r'\d+', text)
+                                    if numbers:
+                                        candidate_num = int(numbers[0])
+                                        if candidate_num in candidate_indices:
+                                            matched_idx = candidate_num
+                                            logger.info(f"VLM matched '{furniture_name}' to object {matched_idx} (label: {segmentation_response.objects[matched_idx].label})")
+                                        else:
+                                            logger.warning(f"VLM returned {candidate_num} which is not in valid candidates {candidate_indices}")
+                        except Exception as e:
+                            logger.warning(f"VLM matching failed: {e}")
                     
-                    # Ask LLM to match
-                    response = genai_client.models.generate_content(
-                        model="gemini-2.0-flash",
-                        contents=content,
-                    )
+                    # FALLBACK: Pick first same-type candidate (deterministic)
+                    if matched_idx is None and candidate_indices:
+                        matched_idx = candidate_indices[0]
+                        logger.info(f"Fallback: assigned '{furniture_name}' to first compatible object {matched_idx} (label: {segmentation_response.objects[matched_idx].label})")
+
+                    # Apply Match
+                    if matched_idx is not None:
+                        used_object_indices.add(matched_idx)
+                        detected_obj = segmentation_response.objects[matched_idx]
+                        
+                        detected = detected_obj.label
+                        if detected.lower() not in matched_labels:
+                            matched_labels.append(detected.lower())
+                            
+                        # Normalize bounding box to 0-1 coordinates
+                        box = detected_obj.box
+                        is_normalized = all(x <= 1.0 for x in box)
+                        
+                        if is_normalized:
+                            normalized_box = box
+                        else:
+                            normalized_box = [
+                                box[0] / img_width,  # x1
+                                box[1] / img_height, # y1
+                                box[2] / img_width,  # x2
+                                box[3] / img_height  # y2
+                            ]
+                        
+                        # Create furniture marker with position
+                        furniture_markers.append(FurnitureWithPosition(
+                            name=furniture_name,
+                            type=furniture_type,
+                            price=furniture.get("price"),
+                            image_url=image_url,
+                            description=furniture.get("description", f"A beautiful {furniture_type} for your space"),
+                            box=normalized_box,
+                            mask_color=[
+                                int(detected_obj.box[0] % 256),  # Placeholder
+                                int(detected_obj.box[1] % 256),
+                                int(detected_obj.box[2] % 256)
+                            ] if detected_obj.box else None
+                        ))
                     
-                    matched_label = response.text.strip().lower()
-                    
-                    # Validate the match is actually in detected labels
-                    if matched_label != "none":
-                        for detected in detected_labels:
+                    # Legacy logic disabled (switched to VLM strategy above)
+                    if False:
+                        for idx, detected_obj in enumerate(segmentation_response.objects):
+                            # Skip if already used
+                            if idx in used_object_indices:
+                                continue
+                                
+                            detected = detected_obj.label
                             if matched_label == detected.lower() or matched_label in detected.lower():
+                                # Mark as used
+                                used_object_indices.add(idx)
+                                
                                 if detected.lower() not in matched_labels:
                                     matched_labels.append(detected.lower())
+                                    
+                                    # Get image dimensions for normalization
+                                    img_width = 1024  # Default, will be updated
+                                    img_height = 1024
+                                    try:
+                                        from PIL import Image
+                                        img = Image.open(io.BytesIO(generated_image_bytes))
+                                        img_width, img_height = img.size
+                                    except:
+                                        pass
+                                    
+                                    # Normalize bounding box to 0-1 coordinates
+                                    box = detected_obj.box
+                                    is_normalized = all(x <= 1.0 for x in box)
+                                    
+                                    if is_normalized:
+                                        normalized_box = box
+                                    else:
+                                        normalized_box = [
+                                            box[0] / img_width,  # x1
+                                            box[1] / img_height, # y1
+                                            box[2] / img_width,  # x2
+                                            box[3] / img_height  # y2
+                                        ]
+                                    
+                                    # Create furniture marker with position
+                                    furniture_markers.append(FurnitureWithPosition(
+                                        name=furniture_name,
+                                        type=furniture_type,
+                                        price=furniture.get("price"),
+                                        image_url=image_url,
+                                        description=furniture.get("description", f"A beautiful {furniture_type} for your space"),
+                                        box=normalized_box,
+                                        mask_color=[
+                                            int(detected_obj.box[0] % 256),  # Placeholder - would need actual mask parsing
+                                            int(detected_obj.box[1] % 256),
+                                            int(detected_obj.box[2] % 256)
+                                        ] if detected_obj.box else None
+                                    ))
                                 break
                 
                 logger.info(f"LLM matched furniture labels: {matched_labels}")
+                logger.info(f"Created {len(furniture_markers)} furniture markers")
                 
             except Exception as e:
                 logger.warning(f"LLM label matching failed: {e}")
@@ -686,6 +925,7 @@ Return ONLY the label, nothing else."""
             furniture_used=furniture_used,
             vibe=vibe_text,
             segmentation=segmentation_response,
+            furniture_markers=furniture_markers,
             matched_labels=matched_labels
         )
         

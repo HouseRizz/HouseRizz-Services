@@ -187,6 +187,19 @@ class SegmentResponse(BaseModel):
     objects: list[DetectedObject] = Field(..., description="List of detected objects")
 
 
+class FurnitureWithPosition(BaseModel):
+    """Furniture item with its position in the generated image."""
+    name: str = Field(..., description="Product name")
+    type: str = Field(..., description="Furniture type (chair, table, etc.)")
+    price: Optional[float] = Field(None, description="Product price")
+    image_url: Optional[str] = Field(None, description="Product image URL")
+    description: Optional[str] = Field(None, description="Product description")
+    # Bounding box in normalized coordinates (0-1)
+    box: list[float] = Field(default_factory=list, description="[x1, y1, x2, y2] normalized 0-1")
+    # Segmentation mask color for highlight effect
+    mask_color: Optional[list[int]] = Field(None, description="[R, G, B] mask color for this object")
+
+
 class DesignWithSegmentationResponse(BaseModel):
     """Response payload for /design/upload-with-segmentation endpoint."""
     success: bool = Field(default=True, description="Whether generation succeeded")
@@ -195,7 +208,9 @@ class DesignWithSegmentationResponse(BaseModel):
     vibe: str = Field(..., description="Vibe/style used")
     # Segmentation data for the GENERATED image
     segmentation: Optional[SegmentResponse] = Field(None, description="Segmentation of generated image")
-    # Matched labels: maps furniture_used types to detected segmentation labels
+    # Furniture with position data for overlay markers
+    furniture_markers: list[FurnitureWithPosition] = Field(default_factory=list, description="Furniture with bounding box positions")
+    # Matched labels (kept for backwards compatibility)
     matched_labels: list[str] = Field(default_factory=list, description="Segmentation labels that match furniture_used items")
 
 

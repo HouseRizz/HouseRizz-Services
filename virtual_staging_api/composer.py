@@ -114,15 +114,33 @@ async def find_furniture_for_needs(
         if results["ids"] and results["ids"][0]:
             for i, item_id in enumerate(results["ids"][0]):
                 metadata = results["metadatas"][0][i]
+                
+                # Get actual product type from metadata, or infer from name
+                product_name = metadata.get("name", "Unknown")
+                product_category = metadata.get("category", "")
+                
+                # Infer type from product name if category is generic
+                inferred_type = product_category
+                if not inferred_type or inferred_type == "furniture":
+                    # Try to extract type from product name
+                    name_lower = product_name.lower()
+                    type_keywords = ["chair", "armchair", "sofa", "table", "bed", "lamp", "rug", "cabinet", "shelf", "desk", "stool", "ottoman", "bench"]
+                    for kw in type_keywords:
+                        if kw in name_lower:
+                            inferred_type = kw
+                            break
+                    if not inferred_type:
+                        inferred_type = need.get("type", "furniture")
+                
                 all_furniture.append({
                     "id": item_id,
-                    "name": metadata.get("name", "Unknown"),
-                    "type": need.get("type", "furniture"),
+                    "name": product_name,
+                    "type": inferred_type,
                     "image_url": metadata.get("filepath", ""),
                     "price": metadata.get("price", 0.0),
                     "searched_for": description
                 })
-                logger.info(f"Found: {metadata.get('name')} for '{description}'")
+                logger.info(f"Found: {product_name} (type: {inferred_type}) for '{description}'")
     
     return all_furniture
 
@@ -198,11 +216,10 @@ STYLE: {vibe_text}
 FURNITURE TO PLACE: {furniture_names}
 
 Instructions:
-- Place each furniture piece naturally in the room
-- Maintain proper perspective, scale, and proportions  
-- Ensure realistic lighting and shadows matching the room
-- Keep the room's original architecture and features
-- Create a cohesive, professional interior design
+- Place the selected furniture pieces naturally, ensuring perfect perspective and scale
+- TRANSFORM the room's atmosphere (lighting, wall colors, flooring) to fully match the requested style
+- PRESERVE structural elements (windows, doors, ceiling height) but UPGRADE finishes if they don't match the style
+- Ensure the final image looks like a high-end editorial interior design photo
 
 Generate a beautiful, photorealistic redesigned room."""
 
