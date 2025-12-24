@@ -1,0 +1,26 @@
+# Ignore environment files with secrets
+.env
+!.env.example
+*.env
+!*.env.example
+
+# Ignore credential files
+*.json
+!package.json
+!package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,0 +1,5 @@
+functions-framework==3.*
+firebase-admin
+openai
+uuid
+google-cloud-secret-manager==2.*

@@ -1,0 +1,10 @@
+# Langchain Scrapper
+.env
+*.json
+!package.json
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+venv/
+.venv/

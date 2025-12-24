@@ -1,0 +1,8 @@
+flask==2.0.1
+werkzeug==2.0.3
+firebase-admin
+google-cloud-firestore
+requests
+python-dotenv
+gunicorn==20.1.0
+flask-cors

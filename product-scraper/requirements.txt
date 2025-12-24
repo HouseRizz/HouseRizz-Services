@@ -1,0 +1,17 @@
+flask==2.0.1
+werkzeug==2.0.3
+firebase-admin
+google-cloud-firestore>=2.14.0
+google-cloud-storage
+google-cloud-tasks
+google-cloud-aiplatform>=1.38.0
+requests
+python-dotenv
+gunicorn==20.1.0
+google-generativeai>=0.8.0
+langchain_core
+langchain_hyperbrowser
+asyncio
+uuid
+flask-cors
+vertexai
